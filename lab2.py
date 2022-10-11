@@ -9,6 +9,7 @@ from datetime import datetime
 from email import message
 from enum import Enum
 from http import client
+from re import T
 from select import select
 import sys
 import pickle
@@ -40,7 +41,7 @@ class State(Enum):
 
 class Lab2(object):
     
-    def __init__(self, gcd_address, next_birthday, su_id, listener_port, selector):
+    def __init__(self, gcd_address, next_birthday, su_id, listener_port):
         self.gcd_address = gcd_address
         self.gcd_host = gcd_address[0]
         self.gcd_port = int(gcd_address[1])
@@ -48,6 +49,7 @@ class Lab2(object):
         days_to_birthday = (self.next_birthday - datetime.now()).days
         self.su_id = int(su_id)
         self.current_pid = (days_to_birthday, self.su_id)
+        self.current_election_data = ""
         self.listener_port = listener_port
         self.gcd_socket = None
         print("listener port is ", listener_port)
@@ -56,9 +58,8 @@ class Lab2(object):
         self.members_dict = {}
         self.leader = False
         self.peer_timeout = 1.5
-        self.selector = selector
+        self.selector = selectors.DefaultSelector()
         self.peers = []
-        self.client_selector = selectors.DefaultSelector()
         self.current_state = State.SEND_ELECTION
 
     def send_and_receive_message(self, message, s):
@@ -86,22 +87,52 @@ class Lab2(object):
         return self.send_and_receive_message(message, s)
 
     def start_election(self):
+        print(self.members)
         for member in self.members.items():
-                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 peer_pid = member[0][0]
                 peerHost, peerPort = member[1]
-                client_socket.settimeout(self.peer_timeout)
-                if self.current_pid[0] < peer_pid or (self.current_pid[0] == peer_pid and self.current_pid[1] < member[0][1]):
-                    try:
-                        print("starting election with : ")
-                        print("peer host" , peerHost)
-                        print("peer port" ,peerPort)
-                        client_socket.setblocking(False)
-                        client_socket.connect_ex((peerHost, peerPort)) ## BLOCKING
-                        events = selectors.EVENT_READ | selectors.EVENT_WRITE
-                        self.selector.register(client_socket, events, data=self.handleElectionResponse)
-                    except Exception as err:
+                hasReceivedOk = False
+                if peer_pid == self.current_pid[0]:
+                    continue
+                try:
+                    # client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    # client_socket.settimeout(self.peer_timeout)
+                    # print("starting election with : ")
+                    # print("peer host" , peerHost)
+                    # print("peer port" ,peerPort)
+                    # client_socket.setblocking(False)
+                    # client_socket.connect_ex((peerHost, peerPort)) ## BLOCKING
+                    # events = selectors.EVENT_READ | selectors.EVENT_WRITE
+                    # self.selector.register(client_socket, events, data=self.handleElectionResponse)
+                    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    client_socket.settimeout(self.peer_timeout)
+                    print("starting election with : ")
+                    print("peer host" , peerHost)
+                    print("peer port" ,peerPort)
+                    client_socket.connect((peerHost, peerPort))
+                    client_socket.sendall(pickle.dumps(('ELECTION', self.members, self.current_pid)))
+                    msg = pickle.loads(client_socket.recv(1024))
+                    print("msg received")
+                    print(msg)
+                    if msg == "OK":
+                        hasReceivedOk = True
+                        self.members_dict[key] = State.WAITING_FOR_VICTOR
+                    if msg == "COORDINATE":
+                        self.members_dict[key] = State.WAITING_FOR_VICTOR # leader is selected, stop the election
+                except TimeoutError:
+                    print("socket timed out")                    
+                    if msg == "" | hasReceivedOk == False:
+                        # send coordinator message to the client
+                        # self.send_coordinator_message()
+                        self.members_dict[key] = State.SEND_VICTORY
+                        client_socket.sendall(pickle.dumps(('COORDINATE', self.members, self.current_pid)))
+                        print("Hey I won the election")
+                except Exception as err:
                         print('failed to connect: {}', err)
+
+    # def send_coordinator_message(self):
+    #     self.members_dict[key] = State.SEND_VICTORY
+    #     print("Hey I won the election")
 
     def set_state(self, member, state):
         print("received message in set state")
@@ -123,47 +154,59 @@ class Lab2(object):
         print(f"Accepted connection from {addr}")
         conn.setblocking(False)
         events = selectors.EVENT_READ | selectors.EVENT_WRITE
-        # data = types.SimpleNamespace(addr=addr, inb=b"", outb=b"")
         self.selector.register(conn, events, data=self.service_connection) # WROTE FROM CLIENT SOCKET
 
-    def handleElectionResponse(self, key, mask):
-        print("called handle election response")
-        sock = key.fileobj
-        data = key.data
-        if mask & selectors.EVENT_READ:
-            recv_data = sock.recv(1024)  # Should be ready to read
-            if recv_data:
-                print("received response is ")
-                print(recv_data)
-            else:
-                print(f"Closing connection to {data}")
-                self.selector.unregister(sock)
-                sock.close()
-        if mask & selectors.EVENT_WRITE:
-            print("inside write now fucking..")
-            message = pickle.dumps(('ELECTION', self.members))
-            if self.current_state == State.SEND_ELECTION:
-                sock.send(message) 
-                self.current_state = State.WAITING_FOR_OK
+    # def handleElectionResponse(self, key, mask):
+    #     print("called handle election response")
+    #     sock = key.fileobj
+    #     data = key.data
+    #     if mask & selectors.EVENT_READ:
+    #         print("received event read")
+    #         recv_data = sock.recv(1024)  # Should be ready to read
+    #         if recv_data:
+    #             print("received response is ")
+    #             print(recv_data)
+    #         else:
+    #             print(f"Closing connection to {data}")
+    #             self.selector.unregister(sock)
+    #             sock.close()
+    #     if mask & selectors.EVENT_WRITE:
+    #         message = pickle.dumps(('ELECTION', self.members))
+    #         if self.current_state == State.SEND_ELECTION:
+    #             print("will send data")
+    #             sock.sendall(message) 
+    #             self.current_state = State.WAITING_FOR_OK
                 
     def service_connection(self, key, mask):
         sock = key.fileobj
         data = key.data
         if mask & selectors.EVENT_READ:
-            print("entered event read")
-            print(sock)
+            # print("entered event read")
+            # print(sock)
             recv_data = sock.recv(1024)  # Should be ready to read
             if recv_data:
+                print("received data ")
+                
                 client_message = pickle.loads(recv_data)
-                self.members = client_message[1] # update members list
-                print("updated members list with ")
-                print(self.members)
+                print(client_message)
+                if client_message[0] == "ELECTION" :
+                    self.current_election_data  = client_message
+                # if client_message[0] == "COORDINATE" :
+                #     self.current_election_data  = client_message
             else:
                 print(f"Closed connection")
                 self.selector.unregister(sock)
                 sock.close()
         if mask & selectors.EVENT_WRITE:
-                sock.send(b'OK')
+            if self.current_election_data is not None:
+                print("now writing data back")
+                client_pid = self.current_election_data[2]
+                print(self.current_pid)
+                print(client_pid)
+                if self.current_pid[0] < client_pid[0] or (self.current_pid[0] == client_pid[0] and self.su_id < client_pid[1]):
+                    print("send ok to client")
+                    sock.sendall(pickle.dumps('OK'))
+            self.current_election_data  = None
             
             
     def update_members_list(self, members):
@@ -188,7 +231,7 @@ if __name__ == '__main__':
     print('SeattleU ID: ', su_id)
     listener_port = int(sys.argv[5])
     sel = selectors.DefaultSelector()
-    lab2 = Lab2(sys.argv[1:3], next_bd, su_id, listener_port, sel)
+    lab2 = Lab2(sys.argv[1:3], next_bd, su_id, listener_port)
     gcd_socket = lab2.connect_to_GCD()
     members = lab2.send_join_message(gcd_socket)
     print(members)
@@ -198,10 +241,7 @@ if __name__ == '__main__':
     lab2.start_election()
     try:
         while True:
-            print("executing loop")
             events = lab2.selector.select(timeout=None) #this is a blocking call
-            print(len(events))
-            print(events)
             for key, mask in events:
                 if key.data is None:
                     lab2.accept_wrapper(key.fileobj)
